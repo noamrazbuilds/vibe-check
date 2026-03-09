@@ -11,13 +11,13 @@ Copy the command file to your global Claude Code commands directory:
 ```bash
 # One-liner install
 curl -o ~/.claude/commands/vibe-check.md \
-  https://raw.githubusercontent.com/nr972/vibe-check/main/commands/vibe-check.md
+  https://raw.githubusercontent.com/noamrazbuilds/vibe-check/main/commands/vibe-check.md
 ```
 
 Or clone and copy:
 
 ```bash
-git clone https://github.com/nr972/vibe-check.git
+git clone https://github.com/noamrazbuilds/vibe-check.git
 cp vibe-check/commands/vibe-check.md ~/.claude/commands/
 ```
 

@@ -205,7 +205,37 @@ Check based on detected auth provider:
 - **Firebase Auth**: is `admin.auth().verifyIdToken()` used server-side (not just client-side `onAuthStateChanged`)?
 - **Better Auth**: is session validation happening server-side?
 
-### 2.2 SQL / Command Injection
+### 2.2 Weak / Fake Cryptography
+
+Search for encoding functions used in security-sensitive contexts (encryption, key protection, secret storage):
+```
+# Base64 masquerading as encryption
+btoa\(                   # Browser base64 encode -- NOT encryption
+atob\(                   # Browser base64 decode
+Buffer\.from.*base64     # Node.js base64 encode/decode
+\.toString\(.*base64     # Node.js base64 encode
+base64.*encode           # Generic base64 encoding
+base64.*decode
+
+# Weak hashing for passwords/secrets
+createHash.*md5          # MD5 -- broken, collisions trivial
+createHash.*sha1         # SHA1 -- broken for security use
+md5\(                    # MD5 hashing function
+sha1\(                   # SHA1 hashing function
+
+# Homemade or XOR-only crypto
+\^.*charCodeAt           # XOR cipher patterns
+charCodeAt.*\^
+String\.fromCharCode.*\^ # XOR decryption
+```
+
+**Context-check each finding:** look at the function/variable names and surrounding code. If a `btoa()`/`atob()` or base64 operation is named `encrypt`, `decrypt`, `cipher`, `protect`, `secure`, `hash`, or operates on API keys, passwords, tokens, or secrets -- flag as HIGH. Base64 is encoding, not encryption: anyone with database read access (SQL injection, misconfigured RLS, backup leak) can decode all values instantly.
+
+**Also check for weak password hashing:** if passwords are hashed with MD5, SHA1, SHA256, or any single-pass hash (even with salt), flag as HIGH. Passwords must use `bcrypt`, `argon2`, or `scrypt` with proper cost factors.
+
+**Fix pattern:** Replace with AES-256-GCM via `crypto.subtle` (Web Crypto API) or Node.js `crypto` module using a proper encryption key from env vars. See Fix Pattern Library.
+
+### 2.3 SQL / Command Injection
 
 Search for:
 ```
@@ -229,7 +259,7 @@ system\(                 # Ruby/PHP system call
 new Function\(           # Dynamic function construction
 ```
 
-### 2.3 Database Security Gaps (based on detected stack)
+### 2.4 Database Security Gaps (based on detected stack)
 
 **If Supabase detected:**
 Search migration files and SQL for `SECURITY DEFINER` -- for each match, verify it also has `SET search_path`. Found in 15+ functions across 3 real projects.
@@ -278,7 +308,7 @@ Check for `$queryRaw` and `$executeRaw` usage without parameterization. Also che
 **If Drizzle detected:**
 Check for `sql.unsafe()` or template literal injection in `sql\`...\`` tagged templates without proper `sql.placeholder()` usage.
 
-### 2.4 Webhook Signature Bypass
+### 2.5 Webhook Signature Bypass
 
 Search for webhook handling code. Check based on payment provider:
 
@@ -294,7 +324,7 @@ Verify: is `stripe.webhooks.constructEvent(body, sig, secret)` called with the r
 - Does it reject requests with a missing signature header? (Not just invalid -- MISSING)
 - Pattern found in production: omitting the `X-Signature` header skipped HMAC verification entirely.
 
-### 2.5 Privilege Escalation
+### 2.6 Privilege Escalation
 
 Search for:
 ```
@@ -308,7 +338,7 @@ Check: can a user modify their own role, status, or permission level?
 
 **Vibe coding pattern:** AI-generated admin panels that check `role === "admin"` only on the client side. The server/database must independently enforce role-based access.
 
-### 2.6 Client-Side Authentication (Vibe Coding Critical)
+### 2.7 Client-Side Authentication (Vibe Coding Critical)
 
 This is the #1 vulnerability in AI-generated apps (Wiz Research). Search for:
 ```
@@ -352,7 +382,13 @@ Search for:
 \.ilike\(.*\$\{          # Template literal in .ilike()
 \.filter\(.*\$\{         # Template literal in .filter()
 \.textSearch\(.*\$\{     # Template literal in .textSearch()
+\.like\(                 # Any .like() or .ilike() usage -- check for wildcard sanitization
+\.ilike\(                # Even without template literals, % and _ chars must be escaped
+```
 
+**Wildcard injection in LIKE queries:** Even when `.ilike()` / `.like()` calls don't use template literals, user input containing `%` or `_` characters can manipulate query behavior. `%` matches any sequence, `_` matches any single character -- an attacker can use these to enumerate data (e.g., `%admin%` to find admin conversations). Every `.ilike()` / `.like()` call must sanitize the search term with a function that strips or escapes `%`, `_`, and other PostgREST-special characters before interpolation. Check that the project has a `sanitizeSearch()` or equivalent function and that all `.ilike()`/`.like()` calls use it.
+
+```
 # Firebase / Firestore injection
 \.where\(.*\$\{          # Dynamic field names in Firestore queries
 \.doc\(.*\$\{            # User-controlled document IDs
@@ -391,6 +427,15 @@ got\(.*\$\{              # Got HTTP client
 ```
 
 Check: does it block private IP ranges (10.x, 172.16-31.x, 192.168.x, 127.x), cloud metadata (169.254.169.254), and non-HTTP protocols?
+
+**IPv6 SSRF bypass:** If the codebase has SSRF protection, check that it also blocks IPv6 private addresses. IPv4-only checks are trivially bypassed:
+- `http://[::1]:8080/admin` -- IPv6 loopback (equivalent to 127.0.0.1)
+- `http://[fe80::1]` -- link-local addresses
+- `http://[fc00::1]` or `http://[fd00::1]` -- unique local addresses (RFC 4193)
+- `http://[::ffff:127.0.0.1]` -- IPv4-mapped IPv6 (bypasses IPv4 regex checks)
+- `http://[::ffff:169.254.169.254]` -- cloud metadata via IPv4-mapped IPv6
+
+Also verify: protocol restriction to `http:` and `https:` only (block `file:`, `ftp:`, `gopher:`, `dict:`, etc.).
 
 ### 3.5 Security Misconfiguration
 
@@ -479,7 +524,21 @@ Search for redirect parameters (`?redirect=`, `?next=`, `?url=`, `?returnTo=`, `
 **Auth.js/NextAuth specific:** Check `callbacks.redirect` -- does it validate the `url` parameter?
 **Clerk specific:** Check `afterSignInUrl` and `afterSignUpUrl` -- are they hardcoded or user-controllable?
 
-### 4.6 PostMessage Origin Validation
+### 4.6 Timing-Unsafe Secret Comparison
+
+Search for token/secret/API key comparisons using `===` or `==`:
+```
+===.*secret               # Direct comparison of secrets
+===.*token                # Direct comparison of tokens
+===.*apiKey               # Direct comparison of API keys
+===.*signature            # Direct comparison of signatures
+```
+
+Check: are security-sensitive string comparisons (webhook signatures, API keys, HMAC digests, CSRF tokens, password reset tokens) using constant-time comparison (`crypto.timingSafeEqual` in Node.js, `hmac.compare_digest` in Python)? Direct `===` comparison leaks information through timing side-channels, allowing attackers to brute-force secrets one character at a time.
+
+**Note:** Not every `===` on a token is vulnerable -- if the token is looked up in a database (e.g., `WHERE token = ?`), the DB handles comparison. Only flag direct in-code comparisons of security-sensitive values.
+
+### 4.7 PostMessage Origin Validation
 
 Search for:
 ```
@@ -781,6 +840,7 @@ Verify that user input is separated from system instructions:
 - Rate limiting on generation endpoints
 - Max tokens configured on API calls
 - No unbounded streaming without user limits
+- **User-controllable model selection:** Check if users can specify an arbitrary model string (e.g., `model_override`, `model` field in request body, URL parameter). If a user can set `model: "gpt-4o"` or any expensive model, they bypass org cost controls and model routing policies. Model names must be validated against an allowlist of permitted models (e.g., via `z.enum([...])` or a config-driven set). Search for: `model.*req\.body`, `model.*params`, `model_override`, `model.*user`, schema fields accepting arbitrary model strings.
 
 **Output Safety:**
 - AI-generated content sanitized before rendering as HTML
@@ -998,11 +1058,22 @@ dangerouslySetInnerHTML={{
 ```typescript
 function isUrlSafeToFetch(url: string): boolean {
   const parsed = new URL(url);
+  // Protocol restriction
   if (!['http:', 'https:'].includes(parsed.protocol)) return false;
-  const ip = parsed.hostname;
+  const hostname = parsed.hostname;
+  // Strip IPv6 brackets for consistent checking
+  const ip = hostname.replace(/^\[|\]$/g, '');
+  // IPv4 private ranges
   if (ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('127.')) return false;
   if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return false;
+  // IPv6 private ranges
+  if (ip === '::1' || ip === '0:0:0:0:0:0:0:1') return false;  // loopback
+  if (/^fe80:/i.test(ip)) return false;                          // link-local
+  if (/^f[cd]/i.test(ip)) return false;                          // unique local (fc00::/7)
+  if (/^::ffff:/i.test(ip)) return false;                        // IPv4-mapped IPv6
+  // Cloud metadata
   if (ip === '169.254.169.254' || ip === 'metadata.google.internal') return false;
+  // Common aliases
   if (ip === 'localhost' || ip === '0.0.0.0') return false;
   return true;
 }
@@ -1011,9 +1082,11 @@ function isUrlSafeToFetch(url: string): boolean {
 ### PostgREST Filter Injection Prevention
 ```typescript
 function sanitizeSearchInput(input: string): string {
-  return input.replace(/[.,()\\]/g, '');
+  // Strip PostgREST-special chars AND SQL LIKE wildcards
+  return input.replace(/[%_.,()\\]/g, '');
 }
-// Apply before every .or() / .ilike() interpolation
+// Apply before every .or() / .ilike() / .like() interpolation
+// % matches any sequence, _ matches any single char -- both enable data enumeration
 ```
 
 ### Static Error Responses (Never Leak Internals)
@@ -1190,6 +1263,56 @@ const product = await db.product.findUnique({ where: { id: req.body.productId } 
 const session = await stripe.checkout.sessions.create({
   line_items: [{ price: product.stripePriceId }], // price from your server
 });
+```
+
+### AES-256-GCM Encryption (replacing base64 / weak crypto)
+```typescript
+// Use Web Crypto API (works in Node.js 18+, Edge Functions, browsers)
+const ALGORITHM = 'AES-GCM';
+const KEY_LENGTH = 256;
+
+async function getEncryptionKey(): Promise<CryptoKey> {
+  const keyHex = process.env.ENCRYPTION_KEY; // 64-char hex string (32 bytes)
+  if (!keyHex || keyHex.length !== 64) throw new Error('ENCRYPTION_KEY must be 64 hex chars');
+  const keyBytes = new Uint8Array(keyHex.match(/.{2}/g)!.map(b => parseInt(b, 16)));
+  return crypto.subtle.importKey('raw', keyBytes, ALGORITHM, false, ['encrypt', 'decrypt']);
+}
+
+async function encrypt(plaintext: string): Promise<string> {
+  const key = await getEncryptionKey();
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encoded = new TextEncoder().encode(plaintext);
+  const ciphertext = await crypto.subtle.encrypt({ name: ALGORITHM, iv }, key, encoded);
+  // Prefix IV to ciphertext, encode as base64
+  const combined = new Uint8Array(iv.length + new Uint8Array(ciphertext).length);
+  combined.set(iv);
+  combined.set(new Uint8Array(ciphertext), iv.length);
+  return 'enc:' + btoa(String.fromCharCode(...combined));
+}
+
+async function decrypt(encrypted: string): Promise<string> {
+  if (!encrypted.startsWith('enc:')) throw new Error('Invalid encrypted format');
+  const key = await getEncryptionKey();
+  const combined = Uint8Array.from(atob(encrypted.slice(4)), c => c.charCodeAt(0));
+  const iv = combined.slice(0, 12);
+  const ciphertext = combined.slice(12);
+  const decrypted = await crypto.subtle.decrypt({ name: ALGORITHM, iv }, key, ciphertext);
+  return new TextDecoder().decode(decrypted);
+}
+```
+
+### Timing-Safe Secret Comparison
+```typescript
+import { timingSafeEqual } from 'crypto';
+
+// WRONG -- vulnerable to timing attacks:
+if (token === expectedToken) { /* ... */ }
+
+// CORRECT -- constant-time comparison:
+function safeCompare(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(Buffer.from(a), Buffer.from(b));
+}
 ```
 
 ### AI Prompt Injection Protection
