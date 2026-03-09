@@ -353,6 +353,36 @@ document\.cookie.*admin
 
 If auth state is checked only via client-side JavaScript with no server-side session validation, flag as CRITICAL. An attacker can bypass by opening DevTools and setting `localStorage.setItem("authenticated", "true")`.
 
+### 2.8 Unauthenticated Application Deployment (Vibe Coding Critical)
+
+Wiz Research found that 20% of vibe-coded apps are deployed to the public internet with **zero authentication**. This is the most common exposure pattern: internal tools, admin dashboards, staging environments, and AI chatbots deployed without any auth layer, discoverable via platform fingerprinting.
+
+**Check 1 -- No auth provider detected:**
+If the tech stack auto-detection (Step 2) found **no authentication provider** (no Clerk, Auth.js, Supabase Auth, Firebase Auth, Better Auth, Lucia, or custom auth middleware), and the app has routes that handle sensitive data (database queries, AI calls, admin panels, user data), flag as HIGH:
+- No auth library in `package.json` / `requirements.txt` / `Gemfile`
+- No middleware or route-level auth checks anywhere in the codebase
+- App is configured for public deployment (has `vercel.json`, `netlify.toml`, `fly.toml`, `Dockerfile`, `railway.json`, or Cloudflare `wrangler.toml`)
+
+**Check 2 -- Platform fingerprinting exposure:**
+Vibe-coding platforms leave identifiable markers that attackers scan for. Search for:
+```
+lovable\.app             # Lovable platform identifier
+base44\.app              # Base44 platform identifier
+bolt\.new               # Bolt platform identifier
+replit\.app              # Replit deployment
+v0\.dev                  # Vercel v0
+```
+If found in deployed HTML/JS and the app handles sensitive data, flag as MEDIUM -- attackers actively fingerprint these platforms to find vulnerable apps.
+
+**Check 3 -- Unprotected deployment configs:**
+Check deployment configuration files for missing auth/access restrictions:
+- `vercel.json` -- no `headers` with auth, no middleware configured
+- `netlify.toml` -- no `_redirects` with auth, no identity configuration
+- Cloudflare `_headers` / `wrangler.toml` -- no Access policies
+- `Dockerfile` -- no auth env vars or middleware in entrypoint
+
+If the app has a deployment config but no auth provider detected anywhere, flag as HIGH with the recommendation to add authentication before deploying.
+
 ---
 
 ## Phase 3: OWASP Top 10 Scan [STANDARD + FULL]
